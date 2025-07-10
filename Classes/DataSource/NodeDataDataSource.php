@@ -47,20 +47,24 @@ class NodeDataDataSource extends AbstractDataSource
      * @var AssetService
      */
     protected $assetService;
+    #[\Neos\Flow\Annotations\Inject]
+    protected \Neos\ContentRepositoryRegistry\ContentRepositoryRegistry $contentRepositoryRegistry;
+    #[\Neos\Flow\Annotations\Inject]
+    protected \Neos\Neos\Domain\NodeLabel\NodeLabelGeneratorInterface $nodeLabelGenerator;
 
     /**
      * Get data
      *
-     * @param NodeInterface $node The node that is currently edited (optional)
+     * @param \Neos\ContentRepository\Core\Projection\ContentGraph\Node $node The node that is currently edited (optional)
      * @param array $arguments Additional arguments (key / value)
      * @return array JSON serializable data
      */
-    public function getData(NodeInterface $node = null, array $arguments = [])
+    public function getData(\Neos\ContentRepository\Core\Projection\ContentGraph\Node $node = null, array $arguments = [])
     {
         $result = [];
 
         // Validate required parameters and arguments
-        if (!$node instanceof NodeInterface)
+        if (!$node instanceof \Neos\ContentRepository\Core\Projection\ContentGraph\Node)
             return [];
         if (!isset($arguments['nodeType']) && !isset($arguments['nodeTypes']))
             return [];
@@ -70,11 +74,13 @@ class NodeDataDataSource extends AbstractDataSource
             $nodeTypes = $arguments['nodeTypes'];
 
         // Context variables
-        $workspaceName = $node->getContext()->getWorkspaceName();
+        $workspaceName = $node->workspaceName;
         $dimensions = $node->getContext()->getDimensions();
         if (isset($arguments['startingPoint'])) {
             $rootNode = $node->getContext()->getNode($arguments['startingPoint']);
         } else {
+            // TODO 9.0 migration: !! ContentContext::getCurrentSiteNode() is removed in Neos 9.0. Use Subgraph and traverse up to "Neos.Neos:Site" node.
+
             $rootNode = $node->getContext()->getCurrentSiteNode();
         }
         $rootNodePath = $rootNode->getPath();
@@ -83,7 +89,7 @@ class NodeDataDataSource extends AbstractDataSource
         $cacheEntryIdentifier = md5(json_encode([$workspaceName, $dimensions, $rootNodePath, $arguments]));
         if ($this->cache->has($cacheEntryIdentifier)) {
             $this->logger->debug(
-                sprintf('Retrieve cached data source for "%s" in [Workspace: %s] [Dimensions: %s] [Root: %s] [Label: %s]', json_encode($arguments), $workspaceName, json_encode($dimensions), $rootNodePath, $node->getLabel()),
+                sprintf('Retrieve cached data source for "%s" in [Workspace: %s] [Dimensions: %s] [Root: %s] [Label: %s]', json_encode($arguments), $workspaceName, json_encode($dimensions), $rootNodePath, $this->nodeLabelGenerator->getLabel($node)),
                 LogEnvironment::fromMethodName(__METHOD__)
             );
             $result = $this->cache->get($cacheEntryIdentifier);
@@ -123,7 +129,7 @@ class NodeDataDataSource extends AbstractDataSource
         $this->cache->set($cacheEntryIdentifier, $result, $cacheEntryTags);
 
         $this->logger->debug(
-            sprintf('Build new data source for "%s" in [Workspace: %s] [Dimensions: %s] [Root: %s] [Label: %s]', json_encode($arguments), $workspaceName, json_encode($dimensions), $rootNodePath, $node->getLabel()),
+            sprintf('Build new data source for "%s" in [Workspace: %s] [Dimensions: %s] [Root: %s] [Label: %s]', json_encode($arguments), $workspaceName, json_encode($dimensions), $rootNodePath, $this->nodeLabelGenerator->getLabel($node)),
             LogEnvironment::fromMethodName(__METHOD__)
         );
 
@@ -131,7 +137,7 @@ class NodeDataDataSource extends AbstractDataSource
     }
 
     /**
-     * @param NodeInterface $parentNode
+     * @param \Neos\ContentRepository\Core\Projection\ContentGraph\Node $parentNode
      * @param array $nodeTypes
      * @param string|null $labelPropertyName
      * @param string|null $previewPropertyName
@@ -140,7 +146,7 @@ class NodeDataDataSource extends AbstractDataSource
      *
      * @return array
      */
-    protected function getNodes(NodeInterface $parentNode, $nodeTypes, $labelPropertyName = null, $previewPropertyName = null, $setLabelPrefixByNodeContext = false, $groupBy = null)
+    protected function getNodes(\Neos\ContentRepository\Core\Projection\ContentGraph\Node $parentNode, $nodeTypes, $labelPropertyName = null, $previewPropertyName = null, $setLabelPrefixByNodeContext = false, $groupBy = null)
     {
         $nodes = [];
         $q = new FlowQuery([$parentNode]);
@@ -152,7 +158,7 @@ class NodeDataDataSource extends AbstractDataSource
         $filterString = implode(',', $filter);
 
         foreach ($q->find($filterString)->sortDataSourceRecursiveByIndex()->get() as $node) {
-            if ($node instanceof NodeInterface) {
+            if ($node instanceof \Neos\ContentRepository\Core\Projection\ContentGraph\Node) {
                 $icon = null;
                 $preview = null;
                 if ($previewPropertyName) {
@@ -164,21 +170,25 @@ class NodeDataDataSource extends AbstractDataSource
                             $preview = $thumbnail['src'];
                     }
                 }
-                if (is_null($preview) && $node->getNodeType()->hasConfiguration('ui.icon')) {
-                    $icon = $node->getNodeType()->getConfiguration('ui.icon');
+                $contentRepository = $this->contentRepositoryRegistry->get($node->contentRepositoryId);
+                if (is_null($preview) && $contentRepository->getNodeTypeManager()->getNodeType($node->nodeTypeName)->hasConfiguration('ui.icon')) {
+                    $contentRepository = $this->contentRepositoryRegistry->get($node->contentRepositoryId);
+                    $icon = $contentRepository->getNodeTypeManager()->getNodeType($node->nodeTypeName)->getConfiguration('ui.icon');
                 }
 
-                $label = $labelPropertyName ? $node->getProperty($labelPropertyName) : $node->getLabel();
+                $label = $labelPropertyName ? $node->getProperty($labelPropertyName) : $this->nodeLabelGenerator->getLabel($node);
                 $label = $this->sanitiseLabel($label);
-                $groupLabel = $parentNode->getLabel();
+                $groupLabel = $this->nodeLabelGenerator->getLabel($parentNode);
 
                 if ($setLabelPrefixByNodeContext) {
                     $label = $this->getLabelPrefixByNodeContext($node, $label);
                     $groupLabel = $this->getLabelPrefixByNodeContext($parentNode, $groupLabel);
                 }
+                // TODO 9.0 migration: Check if you could change your code to work with the NodeAggregateId value object instead.
+
 
                 $nodes[] = array(
-                    'value' => $node->getIdentifier(),
+                    'value' => $node->aggregateId->value,
                     'label' => $label,
                     'group' => ($groupBy !== null ? $groupLabel : null),
                     'icon' => $icon,
@@ -190,27 +200,29 @@ class NodeDataDataSource extends AbstractDataSource
     }
 
     /**
-     * @param NodeInterface $node
+     * @param \Neos\ContentRepository\Core\Projection\ContentGraph\Node $node
      * @param string $label
      *
      * @return string
      */
-    protected function getLabelPrefixByNodeContext(NodeInterface $node, string $label)
+    protected function getLabelPrefixByNodeContext(\Neos\ContentRepository\Core\Projection\ContentGraph\Node $node, string $label)
     {
         $nodeHash = md5($node);
         if (isset($this->labelCache[$nodeHash]))
             return $this->labelCache[$nodeHash];
 
-        if ($node->isHidden())
+        if ($node->tags->contain(\Neos\Neos\Domain\SubtreeTagging\NeosSubtreeTag::disabled()))
             $label = '[HIDDEN] ' . $label;
+        // TODO 9.0 migration: !! Node::isRemoved() - the new CR *never* returns removed nodes; so you can simplify your code and just assume removed == FALSE in all scenarios.
+
         if ($node->isRemoved())
             $label = '[REMOVED] ' . $label;
-        if ($node->isHiddenInIndex())
+        if ($node->getProperty('hiddenInMenu'))
             $label = '[NOT IN MENUS] ' . $label;
 
         $q = new FlowQuery([$node]);
         $nodeInLiveWorkspace = $q->context(['workspaceName' => 'live'])->get(0);
-        if (!$nodeInLiveWorkspace instanceof NodeInterface)
+        if (!$nodeInLiveWorkspace instanceof \Neos\ContentRepository\Core\Projection\ContentGraph\Node)
             $label = '[NOT LIVE] ' . $label;
 
         $this->labelCache[$nodeHash] = $label;

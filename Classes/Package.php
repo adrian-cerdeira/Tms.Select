@@ -17,9 +17,9 @@ class Package extends BasePackage
     public function boot(Bootstrap $bootstrap)
     {
         $dispatcher = $bootstrap->getSignalSlotDispatcher();
-        $dispatcher->connect(Node::class, 'nodeAdded', NodeSignalHandler::class, 'nodeAdded');
-        $dispatcher->connect(Node::class, 'nodeUpdated', NodeSignalHandler::class, 'nodeUpdated');
-        $dispatcher->connect(Node::class, 'nodeRemoved', NodeSignalHandler::class, 'nodeRemoved');
+        $dispatcher->connect(\Neos\ContentRepository\Core\Projection\ContentGraph\Node::class, 'nodeAdded', NodeSignalHandler::class, 'nodeAdded');
+        $dispatcher->connect(\Neos\ContentRepository\Core\Projection\ContentGraph\Node::class, 'nodeUpdated', NodeSignalHandler::class, 'nodeUpdated');
+        $dispatcher->connect(\Neos\ContentRepository\Core\Projection\ContentGraph\Node::class, 'nodeRemoved', NodeSignalHandler::class, 'nodeRemoved');
         $dispatcher->connect(PublishingService::class, 'nodePublished', NodeSignalHandler::class, 'nodePublished');
         $dispatcher->connect(PublishingService::class, 'nodeDiscarded', NodeSignalHandler::class, 'nodeDiscarded');
     }
