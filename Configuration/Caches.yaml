@@ -1,2 +1,0 @@
-Tms_Select_DataSourceCache:
-  backend: Neos\Cache\Backend\FileBackend
