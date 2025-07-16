@@ -1,17 +1,17 @@
 <?php
+
 namespace Tms\Select\DataSource;
 
-use Neos\Cache\Frontend\VariableFrontend;
+use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\FindAncestorNodesFilter;
+use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\NodeType\NodeTypeCriteria;
 use Neos\Eel\FlowQuery\FlowQuery;
 use Neos\Flow\Log\Utility\LogEnvironment;
-use Neos\Media\Domain\Model\ImageInterface;
 use Neos\Media\Domain\Model\ThumbnailConfiguration;
 use Neos\Media\Domain\Service\AssetService;
 use Neos\Neos\Service\DataSource\AbstractDataSource;
-use Neos\ContentRepository\Domain\Model\NodeInterface;
 use Neos\Flow\Annotations as Flow;
+use Neos\Media\Domain\Model\AssetInterface;
 use Psr\Log\LoggerInterface;
-use Tms\Select\Service\CachingService;
 
 class NodeDataDataSource extends AbstractDataSource
 {
@@ -25,17 +25,6 @@ class NodeDataDataSource extends AbstractDataSource
      * @var LoggerInterface
      */
     protected $logger;
-
-    /**
-     * @Flow\Inject
-     * @var CachingService
-     */
-    protected $cachingService;
-
-    /**
-     * @var VariableFrontend
-     */
-    protected $cache;
 
     /**
      * @var array
@@ -73,27 +62,25 @@ class NodeDataDataSource extends AbstractDataSource
         if (isset($arguments['nodeTypes']))
             $nodeTypes = $arguments['nodeTypes'];
 
-        // Context variables
         $workspaceName = $node->workspaceName;
-        $dimensions = $node->getContext()->getDimensions();
+        $dimensions = $node->dimensionSpacePoint->toLegacyDimensionArray();
+        $subgraph = $subgraph = $this->contentRepositoryRegistry->subgraphForNode($node);
+
         if (isset($arguments['startingPoint'])) {
-            $rootNode = $node->getContext()->getNode($arguments['startingPoint']);
+            $rootNode = $subgraph->findNodeByPath($arguments['startingPoint'], $node->aggregateId);
+
+            if ($rootNode === null) {
+                throw new \RuntimeException(sprintf('No node found at path \"%s\".', $arguments['startingPoint']), 1710752111);
+            }
         } else {
-            // TODO 9.0 migration: !! ContentContext::getCurrentSiteNode() is removed in Neos 9.0. Use Subgraph and traverse up to "Neos.Neos:Site" node.
-
-            $rootNode = $node->getContext()->getCurrentSiteNode();
-        }
-        $rootNodePath = $rootNode->getPath();
-
-        // Check for an existing cache entry
-        $cacheEntryIdentifier = md5(json_encode([$workspaceName, $dimensions, $rootNodePath, $arguments]));
-        if ($this->cache->has($cacheEntryIdentifier)) {
-            $this->logger->debug(
-                sprintf('Retrieve cached data source for "%s" in [Workspace: %s] [Dimensions: %s] [Root: %s] [Label: %s]', json_encode($arguments), $workspaceName, json_encode($dimensions), $rootNodePath, $this->nodeLabelGenerator->getLabel($node)),
-                LogEnvironment::fromMethodName(__METHOD__)
+            $filter = FindAncestorNodesFilter::create(
+                NodeTypeCriteria::fromFilterString('Neos.Neos:Site')
             );
-            $result = $this->cache->get($cacheEntryIdentifier);
-            return $result;
+            $rootNode = $subgraph->findAncestorNodes($node->aggregateId, $filter)->first();
+
+            if ($rootNode === null) {
+                throw new \RuntimeException('Could not determine site node from current node upward.', 1710752142);
+            }
         }
 
         // Build data source result
@@ -113,7 +100,7 @@ class NodeDataDataSource extends AbstractDataSource
         if (isset($arguments['groupBy'])) {
             $groupByNodeType = $arguments['groupBy'];
             $q = new FlowQuery([$rootNode]);
-            $q = $q->context(['invisibleContentShown' => true, 'removedContentShown' => true, 'inaccessibleContentShown' => true]);
+            $q = $q->context(['invisibleContentShown' => true]);
             $parentNodes = $q->find('[instanceof ' . $groupByNodeType . ']')->sortDataSourceRecursiveByIndex()->get();
             foreach ($parentNodes as $parentNode) {
                 $result = array_merge($result, $this->getNodes($parentNode, $nodeTypes, $labelPropertyName, $previewPropertyName, $setLabelPrefixByNodeContext, $groupByNodeType));
@@ -122,14 +109,11 @@ class NodeDataDataSource extends AbstractDataSource
             $result = $this->getNodes($rootNode, $nodeTypes, $labelPropertyName, $previewPropertyName, $setLabelPrefixByNodeContext);
         }
 
-        // Whenever a node referenced in the data source changes, the cache entry gets flushed
         if ($groupByNodeType)
             array_push($nodeTypes, $groupByNodeType);
-        $cacheEntryTags = $this->cachingService->nodeTypeTag($nodeTypes, $node);
-        $this->cache->set($cacheEntryIdentifier, $result, $cacheEntryTags);
 
         $this->logger->debug(
-            sprintf('Build new data source for "%s" in [Workspace: %s] [Dimensions: %s] [Root: %s] [Label: %s]', json_encode($arguments), $workspaceName, json_encode($dimensions), $rootNodePath, $this->nodeLabelGenerator->getLabel($node)),
+            sprintf('Build new data source for "%s" in [Workspace: %s] [Dimensions: %s] [Root: %s] [Label: %s]', json_encode($arguments), $workspaceName, json_encode($dimensions), $rootNode->aggregateId->value, $this->nodeLabelGenerator->getLabel($node)),
             LogEnvironment::fromMethodName(__METHOD__)
         );
 
@@ -150,7 +134,7 @@ class NodeDataDataSource extends AbstractDataSource
     {
         $nodes = [];
         $q = new FlowQuery([$parentNode]);
-        $q = $q->context(['invisibleContentShown' => true, 'removedContentShown' => true, 'inaccessibleContentShown' => true]);
+        $q = $q->context(['invisibleContentShown' => true]);
 
         $filter = [];
         foreach ($nodeTypes as $nodeType)
@@ -163,7 +147,7 @@ class NodeDataDataSource extends AbstractDataSource
                 $preview = null;
                 if ($previewPropertyName) {
                     $image = $node->getProperty($previewPropertyName);
-                    if ($image instanceof ImageInterface) {
+                    if ($image instanceof AssetInterface) {
                         $thumbnailConfiguration = new ThumbnailConfiguration(null, 74, null, 56);
                         $thumbnail = $this->assetService->getThumbnailUriAndSizeForAsset($image, $thumbnailConfiguration);
                         if (isset($thumbnail['src']))
@@ -184,8 +168,6 @@ class NodeDataDataSource extends AbstractDataSource
                     $label = $this->getLabelPrefixByNodeContext($node, $label);
                     $groupLabel = $this->getLabelPrefixByNodeContext($parentNode, $groupLabel);
                 }
-                // TODO 9.0 migration: Check if you could change your code to work with the NodeAggregateId value object instead.
-
 
                 $nodes[] = array(
                     'value' => $node->aggregateId->value,
@@ -207,16 +189,13 @@ class NodeDataDataSource extends AbstractDataSource
      */
     protected function getLabelPrefixByNodeContext(\Neos\ContentRepository\Core\Projection\ContentGraph\Node $node, string $label)
     {
-        $nodeHash = md5($node);
+        $nodeHash = md5((string)$node);
         if (isset($this->labelCache[$nodeHash]))
             return $this->labelCache[$nodeHash];
 
         if ($node->tags->contain(\Neos\Neos\Domain\SubtreeTagging\NeosSubtreeTag::disabled()))
             $label = '[HIDDEN] ' . $label;
-        // TODO 9.0 migration: !! Node::isRemoved() - the new CR *never* returns removed nodes; so you can simplify your code and just assume removed == FALSE in all scenarios.
 
-        if ($node->isRemoved())
-            $label = '[REMOVED] ' . $label;
         if ($node->getProperty('hiddenInMenu'))
             $label = '[NOT IN MENUS] ' . $label;
 

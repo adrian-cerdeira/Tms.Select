@@ -1,12 +1,14 @@
 <?php
+
 namespace Tms\Select\Eel\FlowQueryOperations;
 
 /*                                                                        *
  * This script is copied from "Flowpack.Listable".                        *
  *                                                                        */
 
-use Neos\Flow\Annotations as Flow;
-use Neos\ContentRepository\Domain\Model\NodeInterface;
+use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\FindChildNodesFilter;
+use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\NodeType\NodeTypeCriteria;
+use Neos\ContentRepository\Core\Projection\ContentGraph\Nodes;
 use Neos\Eel\FlowQuery\FlowQuery;
 use Neos\Eel\FlowQuery\Operations\AbstractOperation;
 
@@ -59,19 +61,26 @@ class SortDataSourceRecursiveByIndexOperation extends AbstractOperation
 
         /** @var \Neos\ContentRepository\Core\Projection\ContentGraph\Node $node */
         foreach ($nodes as $node) {
-            // TODO 9.0 migration: Check if you could change your code to work with the NodeAggregateId value object instead.
-
             // Collect the list of sorting indices for all parents of the node and the node itself
             $nodeIdentifier = $node->aggregateId->value;
-            // TODO 9.0 migration: !! Node::getIndex() is not supported. You can fetch all siblings and inspect the ordering
 
-            $indexPath = [$node->getIndex()];
+            $indexPath = [];
             $subgraph = $this->contentRepositoryRegistry->subgraphForNode($node);
-            while ($node = $subgraph->findParentNode($node->aggregateId)) {
-                // TODO 9.0 migration: !! Node::getIndex() is not supported. You can fetch all siblings and inspect the ordering
+            $siblingsFilter = FindChildNodesFilter::create(
+                NodeTypeCriteria::fromFilterString($node->nodeTypeName->value)
+            );
+            $siblings = $subgraph->findChildNodes($node->aggregateId, $siblingsFilter);
+            $nodeIndex = $this->getNodeIndex($siblings, $node);
+            $indexPath[] = $nodeIndex;
 
-                $indexPath[] = $node->getIndex();
+            // Traverse through parent nodes
+            while ($node = $subgraph->findParentNode($node->aggregateId)) {
+                // Pass the filter as the second argument to findParentNode
+                $siblings = $subgraph->findChildNodes($node->aggregateId, $siblingsFilter);
+                $nodeIndex = $this->getNodeIndex($siblings, $node);
+                $indexPath[] = $nodeIndex;
             }
+
             $indexPathCache[$nodeIdentifier] = $indexPath;
         }
 
@@ -81,14 +90,11 @@ class SortDataSourceRecursiveByIndexOperation extends AbstractOperation
             if ($a === $b) {
                 return 0;
             }
-            // TODO 9.0 migration: Check if you could change your code to work with the NodeAggregateId value object instead.
-
 
             // Compare index path starting from the site root until a difference is found
             $aIndexPath = $indexPathCache[$a->aggregateId->value];
-            // TODO 9.0 migration: Check if you could change your code to work with the NodeAggregateId value object instead.
-
             $bIndexPath = $indexPathCache[$b->aggregateId->value];
+
             while (count($aIndexPath) > 0 && count($bIndexPath) > 0) {
                 $diff = (array_pop($aIndexPath) - array_pop($bIndexPath));
                 if ($diff !== 0) {
@@ -98,7 +104,21 @@ class SortDataSourceRecursiveByIndexOperation extends AbstractOperation
 
             return 0;
         });
-
         $flowQuery->setContext($nodes);
+    }
+
+    private function getNodeIndex(Nodes $siblings, \Neos\ContentRepository\Core\Projection\ContentGraph\Node $node)
+    {
+        $index = 0;
+
+        // Loop through the siblings to find the index of the node
+        foreach ($siblings as $key => $sibling) {
+            if ($sibling->aggregateId->value == $node->aggregateId->value) {
+                $index = $key;
+                break;
+            }
+        }
+
+        return $index;
     }
 }
