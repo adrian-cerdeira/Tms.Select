@@ -31,7 +31,7 @@ final class FlushCacheHookFactory implements CommandHookFactoryInterface
     {
         $cache = $this->cacheManager->getCache('Tms_Select_DataSourceCache');
 
-        return new PublishingHook(
+        return new FlushCacheHook(
             $this->logger,
             $this->cachingService,
             $cache,
