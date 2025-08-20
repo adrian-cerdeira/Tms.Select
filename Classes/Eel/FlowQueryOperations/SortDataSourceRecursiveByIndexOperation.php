@@ -63,7 +63,6 @@ class SortDataSourceRecursiveByIndexOperation extends AbstractOperation
         foreach ($nodes as $node) {
             // Collect the list of sorting indices for all parents of the node and the node itself
             $nodeIdentifier = $node->aggregateId->value;
-
             $indexPath = [];
             $subgraph = $this->contentRepositoryRegistry->subgraphForNode($node);
             $siblingsFilter = FindChildNodesFilter::create(
@@ -104,6 +103,7 @@ class SortDataSourceRecursiveByIndexOperation extends AbstractOperation
 
             return 0;
         });
+
         $flowQuery->setContext($nodes);
     }
 

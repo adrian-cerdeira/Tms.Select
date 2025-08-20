@@ -2,6 +2,7 @@
 
 namespace Tms\Select\DataSource;
 
+use Neos\Cache\Frontend\VariableFrontend;
 use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\FindAncestorNodesFilter;
 use Neos\ContentRepository\Core\Projection\ContentGraph\Filter\NodeType\NodeTypeCriteria;
 use Neos\Eel\FlowQuery\FlowQuery;
@@ -12,6 +13,7 @@ use Neos\Neos\Service\DataSource\AbstractDataSource;
 use Neos\Flow\Annotations as Flow;
 use Neos\Media\Domain\Model\AssetInterface;
 use Psr\Log\LoggerInterface;
+use Tms\Select\Service\CachingService;
 
 class NodeDataDataSource extends AbstractDataSource
 {
@@ -25,6 +27,17 @@ class NodeDataDataSource extends AbstractDataSource
      * @var LoggerInterface
      */
     protected $logger;
+
+    /**
+     * @Flow\Inject
+     * @var CachingService
+     */
+    protected $cachingService;
+
+    /**
+     * @var VariableFrontend
+     */
+    protected $cache;
 
     /**
      * @var array
@@ -62,6 +75,7 @@ class NodeDataDataSource extends AbstractDataSource
         if (isset($arguments['nodeTypes']))
             $nodeTypes = $arguments['nodeTypes'];
 
+        // Context variables
         $workspaceName = $node->workspaceName;
         $dimensions = $node->dimensionSpacePoint->toLegacyDimensionArray();
         $subgraph = $subgraph = $this->contentRepositoryRegistry->subgraphForNode($node);
@@ -81,6 +95,17 @@ class NodeDataDataSource extends AbstractDataSource
             if ($rootNode === null) {
                 throw new \RuntimeException('Could not determine site node from current node upward.', 1710752142);
             }
+        }
+
+        // Check for an existing cache entry
+        $cacheEntryIdentifier = md5(json_encode([$workspaceName, $dimensions, $arguments]));
+        if ($this->cache->has($cacheEntryIdentifier)) {
+            $this->logger->debug(
+                sprintf('Retrieve cached data source for "%s" in [Workspace: %s] [Dimensions: %s] [Root: %s] [Label: %s]', json_encode($arguments), $workspaceName, json_encode($dimensions), $rootNode->name->value, $this->nodeLabelGenerator->getLabel($node)),
+                LogEnvironment::fromMethodName(__METHOD__)
+            );
+            $result = $this->cache->get($cacheEntryIdentifier);
+            return $result;
         }
 
         // Build data source result
@@ -109,11 +134,17 @@ class NodeDataDataSource extends AbstractDataSource
             $result = $this->getNodes($rootNode, $nodeTypes, $labelPropertyName, $previewPropertyName, $setLabelPrefixByNodeContext);
         }
 
+        // Whenever a node referenced in the data source changes, the cache entry gets flushed
         if ($groupByNodeType)
             array_push($nodeTypes, $groupByNodeType);
 
+        $cacheEntryTags = $this->cachingService->nodeTypeTag($nodeTypes, $node);
+        $cacheEntryTags[] = 'Node_' . $rootNode->aggregateId->value;
+
+        $this->cache->set($cacheEntryIdentifier, $result, $cacheEntryTags);
+
         $this->logger->debug(
-            sprintf('Build new data source for "%s" in [Workspace: %s] [Dimensions: %s] [Root: %s] [Label: %s]', json_encode($arguments), $workspaceName, json_encode($dimensions), $rootNode->aggregateId->value, $this->nodeLabelGenerator->getLabel($node)),
+            sprintf('Build new data source for "%s" in [Workspace: %s] [Dimensions: %s] [Root: %s] [Label: %s]', json_encode($arguments), $workspaceName, json_encode($dimensions), $rootNode->name->value, $this->nodeLabelGenerator->getLabel($node)),
             LogEnvironment::fromMethodName(__METHOD__)
         );
 
@@ -155,8 +186,8 @@ class NodeDataDataSource extends AbstractDataSource
                     }
                 }
                 $contentRepository = $this->contentRepositoryRegistry->get($node->contentRepositoryId);
+
                 if (is_null($preview) && $contentRepository->getNodeTypeManager()->getNodeType($node->nodeTypeName)->hasConfiguration('ui.icon')) {
-                    $contentRepository = $this->contentRepositoryRegistry->get($node->contentRepositoryId);
                     $icon = $contentRepository->getNodeTypeManager()->getNodeType($node->nodeTypeName)->getConfiguration('ui.icon');
                 }
 
